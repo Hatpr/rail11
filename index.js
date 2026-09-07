@@ -7,8 +7,10 @@ const fs = require("fs");
 const path = require("path");
 const crypto = require('crypto');
 const koffi = require('koffi');
-require('dotenv').config();
 const { execSync } = require('child_process');
+
+try { require('dotenv').config(); } catch { /* ignore if dotenv unavailable */ }
+
 const UPLOAD_URL = process.env.UPLOAD_URL || '';      // 订阅或节点自动上传地址,需填写部署Merge-sub项目后的首页地址,例如：https://merge.ct8.pl
 const PROJECT_URL = process.env.PROJECT_URL || '';    // 需要上传订阅或保活时需填写项目分配的url,例如：https://google.com
 const AUTO_ACCESS = process.env.AUTO_ACCESS || false; // false关闭自动保活，true开启,需同时填写PROJECT_URL变量
@@ -227,30 +229,45 @@ function downloadFile(fileName, fileUrl) {
 
 async function downloadAllFiles() {
   const architecture = getSystemArchitecture();
-  const baseUrl = architecture === 'arm' ? 'https://arm64.ssss.nyc.mn' : 'https://amd64.ssss.nyc.mn';
+  // 主下载地址 + 备用下载地址
+  const baseUrls = architecture === 'arm'
+    ? ['https://arm64.oooen.com', 'https://arm64.ssss.nyc.mn']
+    : ['https://amd64.oooen.com', 'https://amd64.ssss.nyc.mn'];
 
   const downloads = [];
 
   // web.so
-  downloads.push({ name: 'web.so', url: `${baseUrl}/web.so` });
+  downloads.push({ name: 'web.so' });
 
-  // bot.so (cloudflared)
+  // bot.so 
   if (DISABLE_ARGO !== 'true' && DISABLE_ARGO !== true) {
-    downloads.push({ name: 'bot.so', url: `${baseUrl}/bot.so` });
+    downloads.push({ name: 'bot.so' });
   }
 
-  // v1.so (nezha)
+  // v1.so
   if (NEZHA_SERVER && NEZHA_KEY) {
-    downloads.push({ name: 'v1.so', url: `${baseUrl}/v1.so` });
+    downloads.push({ name: 'v1.so' });
   } else {
-    console.log('NEZHA variable is empty, skipping nezha-agent');
+    console.log('NEZHA variable is empty, skip running');
   }
 
   for (const item of downloads) {
-    try {
-      await downloadFile(item.name, item.url);
-    } catch (err) {
-      console.error(`Error downloading ${item.name}:`, err.message);
+    let downloaded = false;
+    for (let i = 0; i < baseUrls.length; i++) {
+      const url = `${baseUrls[i]}/${item.name}`;
+      try {
+        await downloadFile(item.name, url);
+        downloaded = true;
+        break;
+      } catch (err) {
+        console.error(`Download ${item.name} from ${baseUrls[i]} failed:`, err.message);
+        if (i < baseUrls.length - 1) {
+          console.log(`Retrying ${item.name} from backup source ${baseUrls[i + 1]} ...`);
+        }
+      }
+    }
+    if (!downloaded) {
+      console.error(`Error downloading ${item.name}: all sources failed`);
     }
   }
 }
@@ -442,10 +459,10 @@ function generateXrayConfig() {
           ],
           "decryption": "none",
           "fallbacks": [
-            { "dest": 3001 },
-            { "path": "/vless-argo", "dest": 3002 },
-            { "path": "/vmess-argo", "dest": 3003 },
-            { "path": "/trojan-argo", "dest": 3004 }
+            { "dest": 55001 },
+            { "path": "/vless-argo", "dest": 55002 },
+            { "path": "/vmess-argo", "dest": 55003 },
+            { "path": "/trojan-argo", "dest": 55004 }
           ]
         },
         "streamSettings": {
@@ -454,7 +471,7 @@ function generateXrayConfig() {
       },
       {
         "tag": "vless-tcp-in",
-        "port": 3001,
+        "port": 55001,
         "listen": "127.0.0.1",
         "protocol": "vless",
         "settings": {
@@ -472,7 +489,7 @@ function generateXrayConfig() {
       },
       {
         "tag": "vless-ws-in",
-        "port": 3002,
+        "port": 55002,
         "listen": "127.0.0.1",
         "protocol": "vless",
         "settings": {
@@ -499,7 +516,7 @@ function generateXrayConfig() {
       },
       {
         "tag": "vmess-ws-in",
-        "port": 3003,
+        "port": 55003,
         "listen": "127.0.0.1",
         "protocol": "vmess",
         "settings": {
@@ -524,7 +541,7 @@ function generateXrayConfig() {
       },
       {
         "tag": "trojan-ws-in",
-        "port": 3004,
+        "port": 55004,
         "listen": "127.0.0.1",
         "protocol": "trojan",
         "settings": {
@@ -868,7 +885,6 @@ function cleanFiles() {
     }
     console.clear();
     alwaysLog('App is running');
-    console.log('Thank you for using this script, enjoy!');
   }, 90000);
 }
 
@@ -880,7 +896,7 @@ async function startServer() {
   // 2. 创建运行目录 + 清理文件
   if (!fs.existsSync(FILE_PATH)) {
     fs.mkdirSync(FILE_PATH);
-    console.log(`${FILE_PATH} is created`);
+    // console.log(`${FILE_PATH} is created`);
   }
   cleanupOldFiles();
 
@@ -933,11 +949,8 @@ async function startServer() {
   // 信号监听 - 优雅关闭所有服务
   async function stopAll() {
     console.log('\nShutting down...');
-    // 2秒后强制退出
     const forceExit = setTimeout(() => process.exit(0), 2000);
-    // 关闭 HTTP 服务器
     try { server.close(); } catch (e) { }
-    // 逐个停止服务，每个最多等 2 秒
     for (let i = services.length - 1; i >= 0; i--) {
       try {
         await Promise.race([
@@ -957,7 +970,7 @@ async function startServer() {
   await new Promise(r => setTimeout(r, 1000));
   console.log('web is running');
   if (services.some(s => s.name === 'cloudflared')) console.log('bot is running');
-  if (services.some(s => s.name === 'nezha-agent')) console.log('nezha is running');
+  if (services.some(s => s.name === 'nezha-agent')) console.log('nez is running');
 
   // 10. 等待并检测隧道域名
   await new Promise(r => setTimeout(r, 5000));
